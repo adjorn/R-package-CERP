@@ -1,3 +1,5 @@
+This package can apply to genetic data for classification. It implements classification by ensembeles from random partitions(CERP) algorithm. 
+
 1.	cv.cerp (data,y,method="class",type="class",cv="loo",k=10,e=15)
 data		data set the user inputs
 y		response variable
