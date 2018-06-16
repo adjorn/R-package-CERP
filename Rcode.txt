@@ -1,0 +1,229 @@
+
+##build the optimal rpart tree
+##y is the target variable,which is character type.
+##x are the variables that are chose to build the model
+
+tree.rpart=function(data,y,x,method="class"){
+require(rpart)
+set.seed(44)
+if(method=="class") data[,y]=as.factor(data[,y])
+data$y=data[,y]  ##creat a new col of target to ajust for formula.
+fit=rpart(formula=y~.,data=data[,c(x,"y")],method=method,control=rpart.control(minsplit=5))
+  ind.min=which.min(fit$cptable[,"xerror"])
+  xerror=fit$cptable[1:ind.min,"xerror"]
+  xer_std=xerror[ind.min]+fit$cptable[ind.min,"xstd"]
+  if(xerror[1]<xer_std) cp=fit$cptable[1,"CP"] else{
+     ind_up=max(which(xerror>=xer_std))
+     ind_f=min(which(xerror<=xer_std))
+     if(ind_up==ind.min|ind_f==ind.min) cp=fit$cptable[ind.min,"CP"] else{
+     cp=sqrt(fit$cptable[ind_f,"CP"]*fit$cptable[ind_up,"CP"])}
+     }
+  fit_prune=prune(fit,cp)
+  return(fit_prune)
+ }
+dump("tree.rpart",file="tree.rpart.R")
+
+
+#################################################################
+##build the cerp model with p(partion size) setted by the user.##
+#################################################################
+ model.cerp=function(data,y,p,e=15){
+  source("tree.rpart.R")
+  predictors=names(data)[names(data)!=y&names(data)!="ID"&names(data)!="IID"&names(data)!="id"&names(data)!="iid"]
+  nc=length(predictors)
+  tre_size=floor(nc/p)
+  n_rmd=nc-tre_size*p ##remainder means the number of trees that is 1 greater than tre_size
+  if(n_rmd==0) factor=sort(rep(1:p,tre_size)) else{
+     factor=sort(c(rep(1:p,tre_size),1:n_rmd))}
+  trees=ens=list()
+  for(j in 1:e){
+   set.seed(j)
+   x.s=sample(predictors,replace=F)
+   x_split=split(x.s,factor)
+  for(i in 1:p){
+  trees[[i]]=tree.rpart(data=data,y=y,x=unlist(x_split[[i]]))
+  }
+  ens[[j]]=trees
+  }
+  fit=list(ens=ens,p=p,num.ens=e)
+  return(fit)
+  }  
+dump("model.cerp",file="model.cerp.R")
+
+############################################################################
+##prediction function for cerp and model.cerp                             ##
+##read the documentation,predict, to obtain more inforemation about type  ##
+##type="prob" is to get the probability.                                  ##
+##type="class" is to get the prediction label                             ##
+############################################################################
+##obj is the object model
+vote=function(x){
+ vot=table(x)
+  maj=max(vot)
+  as.factor(names(vot[vot==maj]))
+}
+dump("vote",file="vote.R")
+
+predict.cerp=function(obj,newdata){
+ source("vote.R")
+ e=obj$num.ens
+ p.size=obj$p
+ vote.ens=vote.tr=pr.ens=pr.tr=list()
+ for(j in 1:e){
+   for(i in 1:p.size){
+    vote.tr[[i]]=predict(obj$ens[[j]][[i]],newdata,type="class")
+    pr.tr[[i]]=predict(obj$ens[[j]][[i]],newdata,type="prob")[,2]
+    }
+vote.m=matrix(unlist(vote.tr),ncol=p.size,byrow=F)
+vote.ens[[j]]=apply(vote.m,1,vote)
+pr.m=matrix(unlist(pr.tr),ncol=p.size,byrow=F)
+pr.ens[[j]]=apply(pr.m,1,mean)
+}
+vote.ens.m=matrix(unlist(vote.ens),ncol=e,byrow=F)
+pred=apply(vote.ens.m,1,vote)
+
+pr.ens.m=matrix(unlist(pr.ens),ncol=e,byrow=F)
+pr=apply(pr.ens.m,1,mean)
+
+##order the factor level. Otherwise,factor level can be (0,1) or (1,0).
+pred=as.character(pred);pred=as.factor(pred)
+result=list(pred=pred,prob=pr)
+return(result)
+}
+dump("predict.cerp",file="predict.cerp.R")
+
+
+###################
+##stat function  ##
+###################
+stat=function(table){
+    table=as.matrix(table)
+    N=sum(table)
+    ACC=(table[1,1]+table[2,2])/N
+    SN=table[2,2]/(table[2,1]+table[2,2])
+    SP=table[1,1]/(table[1,1]+table[1,2])
+    PPV=table[2,2]/(table[1,2]+table[2,2])
+    NPV=table[1,1]/(table[1,1]+table[2,1])
+    name=c("ACC","SN","SP","PPV","NPV")
+    result=c(ACC,SN,SP,PPV,NPV)
+    stat=data.frame(name,result)
+    return(stat)
+}
+dump("stat",file="stat.R")
+
+####################################
+##cross validation for model.cerp ##
+####################################
+cv.model.cerp=function(data,y,p,e=15){
+  source("model.cerp.R")
+  source("predict.cerp.R")
+  source("stat.R")
+  set.seed(42)
+  pred=pr=list()
+  ##leave one out cross validation
+  for(j in 1:nrow(data)){
+  testing=data[j,]
+  training=data[-j,]
+  fit=model.cerp(training,y,p,e=e)
+  pred[[j]]=predict.cerp(fit,testing)$pred
+  pr[[j]]=predict.cerp(fit,testing)$prob
+  }
+  pred=unlist(pred)
+  pr=unlist(pr)
+  library(ROCR)
+  ##pr is predictions,pred is lable
+  pr=prediction(pr,pred)
+  plot(performance(pr, "tpr", "fpr"))
+  
+  ##order the factor levels to prevent factor levels from (1,0).
+  pred=as.character(pred);pred=as.factor(pred)
+  true=factor(data[,y])
+  confussion=table(true,pred)
+  stat=stat(confussion)
+  result=list(pred=pred,confussion=confussion,stat=stat)
+  return(result)
+}
+dump("cv.model.cerp",file="cv.model.cerp.R")
+
+
+
+#########################################
+##find the optimal p.                  ##
+##e=1                                  ##
+##find p using cross validation method ##
+#########################################
+##convert an even integer to an ood otherwise keep the odd number.                          
+odd=function(p){if(p%%2==0) p=p+1 
+return(p)}
+dump("odd",file="odd.R")
+
+opt.p=function(data,y){
+  source("odd.R")
+  source("cv.model.cerp.R")
+  source("odd.R")
+  source("err.R")
+  predictors=names(data)[names(data)!=y&names(data)!="ID"&names(data)!="IID"&names(data)!="id"&names(data)!="iid"]
+  nc=length(predictors)
+  p0=odd(floor(nc/sqrt(nc)))  ##initial the partition size.
+  p1=odd(floor(nc/sqrt(nc/2)))##p1 and p2 stand for different directions
+  p2=odd(floor(nc/sqrt(2*nc)))
+  e=1
+    acc_p0=cv.model.cerp(data=data,y=y,p=p0,e=e)[[3]]$result[1]
+    acc_p1=cv.model.cerp(data=data,y=y,p=p1,e=e)[[3]]$result[1]
+    acc_p2=cv.model.cerp(data=data,y=y,p=p2,e=e)[[3]]$result[1]
+    acc=c(acc_p1,acc_p0,acc_p2)
+    p_v=c(p1,p0,p2)
+    acc_p=data.frame(acc,p_v)
+    if(acc_p0==acc_p1&acc_p1==acc_p2) p=p0 else
+       if(max(acc_p$acc)==acc_p0|min(acc_p$acc)==acc_p0) p=acc_p[which.max(acc_p$acc),"p_v"] else
+         if(max(acc_p$acc)==acc_p1){
+              acc=c(acc_p0,acc_p1)
+              p_v=c(p0,p1)
+              for(i in 3:nc){
+              p_v[i]=odd(floor(nc/sqrt(nc/i)))
+              acc[i]=cv.model.cerp(data=data,y=y,p=p_v[i],e=e)[[3]]$result[1]
+              if(acc[i]<acc[i-1]){p=p_v[i-1]
+                               break
+                                 }
+                             }
+              }else
+               if(max(acc_p$acc)==acc_p2){
+                   acc=c(acc_p0,acc_p2)
+                   p_v=c(p0,p2)
+                   for(i in 3:nc){
+                   p_v[i]=odd(floor(nc/sqrt(nc*i)))
+                   acc[i]=cv.model.cerp(data=data,y=y,p=p_v[i],e=e)[[3]]$result[1]
+                   if(acc[i]<acc[i-1]){p=p_v[i-1]
+                                    break
+                                      }
+                                  }
+               }
+         
+return(p)
+}
+dump("opt.p",file="opt.p.R")
+##########################################################
+##final cerp model with optimal p included in the model ##
+##prediction function is the same as prediction.cerp    ##
+########################################################## 
+
+cerp=function(data,y,e=15){
+   source("opt.p.R")
+   source("model.cerp.R")
+   p=opt.p(data=data,y=y)
+   fit=model.cerp(data,y,p,e)
+   return(fit)
+   }
+dump("cerp",file="cerp.R")
+#########################################################
+##corss validation for cerp                            ##
+##for the same data set, p is the same                 ##
+#########################################################
+cv.cerp=function(data,y,e=15){
+p=opt.p(data,y) 
+result=cv.model.cerp(data,y,p,e=e)
+return(result)
+}
+
+dump("cv.cerp",file="cv.cerp.R")
+
